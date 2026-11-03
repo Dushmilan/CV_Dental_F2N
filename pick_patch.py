@@ -36,6 +36,15 @@ def snap_patch(
         raise ValueError(
             f"Image {width}x{height} is smaller than the {multiple}-pixel patch grid."
         )
+    if multiple <= 0 or min_size <= 0:
+        raise ValueError("Patch multiple and minimum size must be positive.")
+    min_size = math.ceil(min_size / multiple) * multiple
+    max_w = (width // multiple) * multiple
+    max_h = (height // multiple) * multiple
+    if max_w < min_size or max_h < min_size:
+        raise ValueError(
+            f"Image {width}x{height} cannot fit the {min_size}x{min_size} minimum patch."
+        )
 
     xa, xb = sorted((float(x0), float(x1)))
     ya, yb = sorted((float(y0), float(y1)))
@@ -46,8 +55,8 @@ def snap_patch(
 
     w = max(min_size, int(round((xb - xa) / multiple)) * multiple)
     h = max(min_size, int(round((yb - ya) / multiple)) * multiple)
-    w = min(w, (width // multiple) * multiple)
-    h = min(h, (height // multiple) * multiple)
+    w = min(w, max_w)
+    h = min(h, max_h)
 
     cx = (xa + xb) / 2.0
     cy = (ya + yb) / 2.0
@@ -231,12 +240,17 @@ def validate_explicit_patch(
     height: int,
     width: int,
     multiple: int = 8,
+    min_size: int = 32,
 ) -> tuple[int, int, int, int]:
     """Validate a patch supplied on the command line."""
     if w <= 0 or h <= 0:
         raise ValueError(f"Patch size must be positive, got {w}x{h}.")
     if w % multiple or h % multiple:
         raise ValueError(f"Patch size must be a multiple of {multiple}, got {w}x{h}.")
+    if w < min_size or h < min_size:
+        raise ValueError(
+            f"Patch size must be at least {min_size}x{min_size}, got {w}x{h}."
+        )
     if x < 0 or y < 0 or x + w > width or y + h > height:
         raise ValueError(
             f"Patch ({x}, {y}, {w}, {h}) does not fit in {width}x{height}."
@@ -320,6 +334,7 @@ def make_result_figure(
     metrics: dict,
     display_window: tuple[float, float],
     save_path: Path,
+    show: bool = False,
 ) -> Path:
     """Save a six-panel inspection figure for one patch run."""
     x, y, w, h = coords
@@ -354,6 +369,8 @@ def make_result_figure(
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    if show:
+        plt.show()
     plt.close(fig)
     return save_path
 
@@ -382,7 +399,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar=("X", "Y", "W", "H"),
         help="Skip the picker and use this patch.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.patch_size <= 0:
+        parser.error("--patch-size must be positive")
+    if args.min_patch < 32:
+        parser.error("--min-patch must be at least 32")
+    if args.min_patch % args.patch_size:
+        parser.error("--min-patch must be a multiple of --patch-size")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -394,7 +418,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.patch is not None:
         coords = validate_explicit_patch(
-            *args.patch, *slice_hu.shape, multiple=args.patch_size
+            *args.patch,
+            *slice_hu.shape,
+            multiple=args.patch_size,
+            min_size=args.min_patch,
         )
     else:
         coords = select_patch(
@@ -426,10 +453,14 @@ def main(argv: list[str] | None = None) -> int:
 
     denoised_padded = unit_to_hu(denoised_unit, tuple(args.window))
     denoised_hu = denoised_padded[top:top + h, left:left + w]
-    metrics = compute_metrics(patch_hu, denoised_hu, tuple(args.window))
     cropped_sigmas = [
         sigma[top:top + h, left:left + w] for sigma in info["sigmas"]
     ]
+    if not np.isfinite(denoised_unit).all() or not np.isfinite(denoised_hu).all():
+        raise RuntimeError(f"Non-finite output for patch {coords}.")
+    if not all(np.isfinite(sigma).all() for sigma in cropped_sigmas):
+        raise RuntimeError(f"Non-finite sigma map for patch {coords}.")
+    metrics = compute_metrics(patch_hu, denoised_hu, tuple(args.window))
 
     out_dir = Path(args.out) / f"slice_{args.slice}_x{x}_y{y}_w{w}_h{h}"
     config = {
@@ -470,6 +501,7 @@ def main(argv: list[str] | None = None) -> int:
         metrics=metrics,
         display_window=tuple(args.display_window),
         save_path=out_dir / "result.png",
+        show=args.patch is None,
     )
     print(
         f"trained slice {args.slice} patch {coords}  params={info['params']}  "

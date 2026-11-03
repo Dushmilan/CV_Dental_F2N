@@ -114,3 +114,109 @@ def test_parse_args_accepts_a_patch_bypass():
     args = pick_patch.parse_args(["--slice", "106", "--patch", "120", "140", "64", "64"])
     assert args.slice == 106
     assert args.patch == [120, 140, 64, 64]
+
+
+def test_snap_patch_rejects_an_image_below_the_minimum_patch():
+    for size in (16, 24):
+        with pytest.raises(ValueError):
+            pick_patch.snap_patch(0, 0, size, size, size, size)
+
+
+def test_validate_explicit_patch_enforces_the_minimum_size():
+    with pytest.raises(ValueError):
+        pick_patch.validate_explicit_patch(0, 0, 8, 8, 265, 370)
+    with pytest.raises(ValueError):
+        pick_patch.validate_explicit_patch(0, 0, 24, 64, 265, 370)
+    assert pick_patch.validate_explicit_patch(0, 0, 32, 32, 265, 370) == (0, 0, 32, 32)
+
+
+def test_parse_args_rejects_an_invalid_minimum_patch():
+    with pytest.raises(SystemExit):
+        pick_patch.parse_args(["--min-patch", "50"])
+    with pytest.raises(SystemExit):
+        pick_patch.parse_args(["--min-patch", "24"])
+
+
+def _fake_train(patch, **kwargs):
+    sigmas = [np.zeros((*patch.shape, 3), dtype=np.float32)]
+    return patch.copy(), [1.0], {
+        "loss": 1.0,
+        "train_seconds": 0.01,
+        "params": 10,
+        "sigmas": sigmas,
+    }
+
+
+def test_main_aborts_on_non_finite_output_before_writing(tmp_path, monkeypatch):
+    np.save(tmp_path / "volume.npy", np.zeros((2, 40, 40), dtype=np.float32))
+
+    def fake_train(patch, **kwargs):
+        out = np.full(patch.shape, np.nan, dtype=np.float32)
+        return out, [1.0], {
+            "loss": 1.0,
+            "train_seconds": 0.01,
+            "params": 10,
+            "sigmas": [np.zeros((*patch.shape, 3), dtype=np.float32)],
+        }
+
+    monkeypatch.setattr(pick_patch, "train_patch", fake_train)
+    out_dir = tmp_path / "out"
+    with pytest.raises(RuntimeError):
+        pick_patch.main([
+            "--input", str(tmp_path / "volume.npy"),
+            "--slice", "0",
+            "--patch", "0", "0", "32", "32",
+            "--epochs", "1",
+            "--out", str(out_dir),
+        ])
+    assert not out_dir.exists()
+
+
+def test_make_result_figure_shows_only_when_requested(tmp_path, monkeypatch):
+    shown = []
+    monkeypatch.setattr(pick_patch.plt, "show", lambda: shown.append(True))
+    patch = np.zeros((32, 32), dtype=np.float32)
+    kwargs = dict(
+        slice_hu=np.zeros((40, 40), dtype=np.float32),
+        patch_input_hu=patch,
+        patch_denoised_hu=patch,
+        sigmas=[np.zeros((32, 32, 3), dtype=np.float32)],
+        coords=(0, 0, 32, 32),
+        metrics={
+            "mean_abs_change_hu": 0.0,
+            "max_abs_change_hu": 0.0,
+            "psnr_input": 50.0,
+            "ssim_input": 1.0,
+        },
+        display_window=(-200.0, 400.0),
+    )
+    pick_patch.make_result_figure(**kwargs, save_path=tmp_path / "a.png")
+    assert shown == []
+    pick_patch.make_result_figure(**kwargs, save_path=tmp_path / "b.png", show=True)
+    assert shown == [True]
+
+
+def test_main_shows_result_only_after_gui_selection(tmp_path, monkeypatch):
+    np.save(tmp_path / "volume.npy", np.zeros((2, 40, 40), dtype=np.float32))
+    monkeypatch.setattr(pick_patch, "train_patch", _fake_train)
+    monkeypatch.setattr(pick_patch, "select_patch", lambda *a, **k: (0, 0, 32, 32))
+    captured = {}
+
+    def fake_figure(**kwargs):
+        captured.update(kwargs)
+        return kwargs["save_path"]
+
+    monkeypatch.setattr(pick_patch, "make_result_figure", fake_figure)
+
+    common = [
+        "--input", str(tmp_path / "volume.npy"),
+        "--slice", "0",
+        "--epochs", "1",
+        "--patch", "0", "0", "32", "32",
+    ]
+    pick_patch.main([*common, "--out", str(tmp_path / "explicit")])
+    assert captured["show"] is False
+
+    gui = ["--input", str(tmp_path / "volume.npy"), "--slice", "0", "--epochs", "1"]
+    pick_patch.main([*gui, "--out", str(tmp_path / "gui")])
+    assert captured["show"] is True
