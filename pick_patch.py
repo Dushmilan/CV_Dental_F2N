@@ -295,7 +295,8 @@ def select_patch(
             erelease.ydata,
         )
 
-    RectangleSelector(
+    # Keep a reference: matplotlib widgets are garbage-collected otherwise.
+    selector = RectangleSelector(
         ax,
         onselect,
         useblit=False,
@@ -305,6 +306,7 @@ def select_patch(
         spancoords="pixels",
         interactive=True,
     )
+    selector.set_active(True)
 
     def on_key(event) -> None:
         if event.key == "enter":

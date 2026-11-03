@@ -3,6 +3,7 @@ matplotlib.use("Agg")
 
 import numpy as np
 import pytest
+from matplotlib.backend_bases import KeyEvent, MouseEvent
 
 import pick_patch
 
@@ -94,6 +95,24 @@ def test_select_patch_requires_a_display(monkeypatch):
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     with pytest.raises(RuntimeError):
         pick_patch.select_patch(np.zeros((8, 8), dtype=np.float32), (-200, 400))
+
+
+def test_select_patch_accepts_a_dragged_rectangle(monkeypatch):
+    monkeypatch.setenv("DISPLAY", ":0")
+    slice_hu = np.zeros((265, 370), dtype=np.float32)
+
+    def fake_show():
+        fig = pick_patch.plt.gcf()
+        ax = fig.axes[0]
+        (x0, y0), (x1, y1) = ax.transData.transform([(40, 40), (120, 120)])
+        MouseEvent("button_press_event", fig.canvas, x0, y0, button=1)._process()
+        MouseEvent("motion_notify_event", fig.canvas, x1, y1, button=1)._process()
+        MouseEvent("button_release_event", fig.canvas, x1, y1, button=1)._process()
+        KeyEvent("key_press_event", fig.canvas, "enter")._process()
+
+    monkeypatch.setattr(pick_patch.plt, "show", fake_show)
+
+    assert pick_patch.select_patch(slice_hu, (-200, 400)) == (40, 40, 80, 80)
 
 
 def test_validate_explicit_patch_rejects_bad_input():
