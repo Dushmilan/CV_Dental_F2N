@@ -82,3 +82,35 @@ def test_save_run_writes_arrays_config_and_curve(tmp_path):
     for name in ("patch_input_hu.npy", "patch_denoised_hu.npy", "loss_curve.png", "run_config.json"):
         assert (out / name).exists()
     assert json.loads((out / "run_config.json").read_text())["slice"] == 106
+
+
+def test_extents_to_patch_reorders_and_handles_cancel():
+    assert pick_patch.extents_to_patch((10, 74, 20, 90), 265, 370) == (10, 19, 64, 72)
+    assert pick_patch.extents_to_patch(None, 265, 370) is None
+
+
+def test_select_patch_requires_a_display(monkeypatch):
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    with pytest.raises(RuntimeError):
+        pick_patch.select_patch(np.zeros((8, 8), dtype=np.float32), (-200, 400))
+
+
+def test_validate_explicit_patch_rejects_bad_input():
+    assert pick_patch.validate_explicit_patch(10, 20, 64, 64, 265, 370) == (10, 20, 64, 64)
+    with pytest.raises(ValueError):
+        pick_patch.validate_explicit_patch(10, 20, 63, 64, 265, 370)
+    with pytest.raises(ValueError):
+        pick_patch.validate_explicit_patch(340, 240, 64, 64, 265, 370)
+
+
+def test_validate_slice_index_rejects_out_of_range():
+    pick_patch.validate_slice_index(168, 169)
+    with pytest.raises(ValueError):
+        pick_patch.validate_slice_index(169, 169)
+
+
+def test_parse_args_accepts_a_patch_bypass():
+    args = pick_patch.parse_args(["--slice", "106", "--patch", "120", "140", "64", "64"])
+    assert args.slice == 106
+    assert args.patch == [120, 140, 64, 64]

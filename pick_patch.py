@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
+import os
 import random
+import sys
 import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from matplotlib.patches import Rectangle
+from matplotlib.widgets import RectangleSelector
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
 from filter2noise import DenoisingPipeline, LossFunction
@@ -202,3 +207,276 @@ def save_run(
     fig.savefig(out / "loss_curve.png", dpi=150)
     plt.close(fig)
     return out
+
+
+def extents_to_patch(
+    extents: tuple[float, float, float, float] | None,
+    height: int,
+    width: int,
+    multiple: int = 8,
+    min_size: int = 32,
+) -> tuple[int, int, int, int] | None:
+    """Convert matplotlib ``(xmin, xmax, ymin, ymax)`` to ``(x, y, w, h)``."""
+    if extents is None:
+        return None
+    x0, x1, y0, y1 = extents
+    return snap_patch(x0, y0, x1, y1, height, width, multiple, min_size)
+
+
+def validate_explicit_patch(
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    height: int,
+    width: int,
+    multiple: int = 8,
+) -> tuple[int, int, int, int]:
+    """Validate a patch supplied on the command line."""
+    if w <= 0 or h <= 0:
+        raise ValueError(f"Patch size must be positive, got {w}x{h}.")
+    if w % multiple or h % multiple:
+        raise ValueError(f"Patch size must be a multiple of {multiple}, got {w}x{h}.")
+    if x < 0 or y < 0 or x + w > width or y + h > height:
+        raise ValueError(
+            f"Patch ({x}, {y}, {w}, {h}) does not fit in {width}x{height}."
+        )
+    return int(x), int(y), int(w), int(h)
+
+
+def validate_slice_index(index: int, n_slices: int) -> None:
+    """Raise when ``index`` is outside the volume."""
+    if not 0 <= index < n_slices:
+        raise ValueError(f"Slice index {index} is outside 0..{n_slices - 1}.")
+
+
+def select_patch(
+    slice_hu: np.ndarray,
+    display_window: tuple[float, float],
+    *,
+    multiple: int = 8,
+    min_size: int = 32,
+) -> tuple[int, int, int, int] | None:
+    """Show the slice and return the rectangle the user confirms with Enter."""
+    if sys.platform.startswith("linux") and not (
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    ):
+        raise RuntimeError("No graphical display: set DISPLAY or WAYLAND_DISPLAY")
+
+    lo, hi = display_window
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.imshow(slice_hu, cmap="gray", vmin=lo, vmax=hi)
+    ax.set_title("Drag a rectangle. Enter = confirm, Esc = cancel")
+    ax.axis("off")
+
+    state: dict = {"extents": None, "confirmed": False}
+
+    def onselect(eclick, erelease) -> None:
+        if None in (eclick.xdata, erelease.xdata, eclick.ydata, erelease.ydata):
+            return
+        state["extents"] = (
+            eclick.xdata,
+            erelease.xdata,
+            eclick.ydata,
+            erelease.ydata,
+        )
+
+    RectangleSelector(
+        ax,
+        onselect,
+        useblit=False,
+        button=[1],
+        minspanx=2,
+        minspany=2,
+        spancoords="pixels",
+        interactive=True,
+    )
+
+    def on_key(event) -> None:
+        if event.key == "enter":
+            state["confirmed"] = True
+            plt.close(fig)
+        elif event.key in ("escape", "esc"):
+            state["extents"] = None
+            plt.close(fig)
+
+    fig.canvas.mpl_connect("key_press_event", on_key)
+    plt.show()
+    plt.close(fig)
+
+    if not state["confirmed"]:
+        return None
+    height, width = slice_hu.shape
+    return extents_to_patch(state["extents"], height, width, multiple, min_size)
+
+
+def make_result_figure(
+    *,
+    slice_hu: np.ndarray,
+    patch_input_hu: np.ndarray,
+    patch_denoised_hu: np.ndarray,
+    sigmas: list[np.ndarray],
+    coords: tuple[int, int, int, int],
+    metrics: dict,
+    display_window: tuple[float, float],
+    save_path: Path,
+) -> Path:
+    """Save a six-panel inspection figure for one patch run."""
+    x, y, w, h = coords
+    lo, hi = display_window
+    diff = patch_denoised_hu.astype(np.float32) - patch_input_hu.astype(np.float32)
+    diff_limit = max(1.0, float(np.abs(diff).max()) * 8.0)
+    sigma_r = sigmas[0][..., 2]
+    sigma_xy = np.sqrt(sigmas[0][..., 0] ** 2 + sigmas[0][..., 1] ** 2)
+
+    fig, axes = plt.subplots(2, 3, figsize=(15, 9))
+    panels = [
+        (axes[0, 0], slice_hu, "gray", lo, hi, f"Slice, patch x={x} y={y} w={w} h={h}"),
+        (axes[0, 1], patch_input_hu, "gray", lo, hi, "Patch input"),
+        (axes[0, 2], patch_denoised_hu, "gray", lo, hi, "Patch denoised"),
+        (axes[1, 0], diff * 8.0, "seismic", -diff_limit, diff_limit, "Difference x8 (HU)"),
+        (axes[1, 1], sigma_r, "magma", None, None, "sigma_r (stage 1)"),
+        (axes[1, 2], sigma_xy, "viridis", 0.0, None, "sqrt(sigma_x^2 + sigma_y^2)"),
+    ]
+    for ax, image, cmap, vmin, vmax, title in panels:
+        ax.imshow(image, cmap=cmap, vmin=vmin, vmax=vmax)
+        ax.set_title(title)
+        ax.axis("off")
+
+    axes[0, 0].add_patch(Rectangle((x, y), w, h, fill=False, edgecolor="red", lw=1.5))
+    fig.suptitle(
+        f"mean|dHU|={metrics['mean_abs_change_hu']:.2f}  "
+        f"max|dHU|={metrics['max_abs_change_hu']:.1f}  "
+        f"PSNR={metrics['psnr_input']:.2f} dB  "
+        f"SSIM={metrics['ssim_input']:.4f}"
+    )
+    fig.tight_layout()
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return save_path
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse the command line."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input", default="/home/dushmilan/Desktop/data.npy")
+    parser.add_argument("--slice", type=int, default=106)
+    parser.add_argument("--epochs", type=int, default=500)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lambda-weight", type=float, default=350.0)
+    parser.add_argument("--num-stages", type=int, default=2)
+    parser.add_argument("--patch-size", type=int, default=8)
+    parser.add_argument("--window", type=float, nargs=2, default=(-1000.0, 2000.0))
+    parser.add_argument("--display-window", type=float, nargs=2, default=(-200.0, 400.0))
+    parser.add_argument("--seed", type=int, default=77)
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--out", default="runs/patch_test")
+    parser.add_argument("--min-patch", type=int, default=32)
+    parser.add_argument(
+        "--patch",
+        nargs=4,
+        type=int,
+        default=None,
+        metavar=("X", "Y", "W", "H"),
+        help="Skip the picker and use this patch.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run one interactive or explicit patch denoising job."""
+    args = parse_args(argv)
+    volume = np.load(args.input, mmap_mode="r")
+    validate_slice_index(args.slice, volume.shape[0])
+    slice_hu = np.asarray(volume[args.slice], dtype=np.float32)
+
+    if args.patch is not None:
+        coords = validate_explicit_patch(
+            *args.patch, *slice_hu.shape, multiple=args.patch_size
+        )
+    else:
+        coords = select_patch(
+            slice_hu,
+            tuple(args.display_window),
+            multiple=args.patch_size,
+            min_size=args.min_patch,
+        )
+        if coords is None:
+            print("cancelled")
+            return 0
+
+    x, y, w, h = coords
+    patch_hu = slice_hu[y:y + h, x:x + w]
+    patch_unit = hu_to_unit(patch_hu, tuple(args.window))
+    padded, (top, left) = pad_to_multiple(patch_unit, args.patch_size * 2)
+
+    device = resolve_device(args.device)
+    denoised_unit, losses, info = train_patch(
+        padded,
+        device=device,
+        epochs=args.epochs,
+        lr=args.lr,
+        lambda_weight=args.lambda_weight,
+        num_stages=args.num_stages,
+        patch_size=args.patch_size,
+        seed=args.seed,
+    )
+
+    denoised_padded = unit_to_hu(denoised_unit, tuple(args.window))
+    denoised_hu = denoised_padded[top:top + h, left:left + w]
+    metrics = compute_metrics(patch_hu, denoised_hu, tuple(args.window))
+    cropped_sigmas = [
+        sigma[top:top + h, left:left + w] for sigma in info["sigmas"]
+    ]
+
+    out_dir = Path(args.out) / f"slice_{args.slice}_x{x}_y{y}_w{w}_h{h}"
+    config = {
+        "input": str(Path(args.input).resolve()),
+        "slice": args.slice,
+        "coords": [x, y, w, h],
+        "window": list(args.window),
+        "display_window": list(args.display_window),
+        "epochs": args.epochs,
+        "lr": args.lr,
+        "lambda_weight": args.lambda_weight,
+        "num_stages": args.num_stages,
+        "patch_size": args.patch_size,
+        "seed": args.seed,
+        "device": str(device),
+        "torch_version": torch.__version__,
+        "params": info["params"],
+        "train_seconds": info["train_seconds"],
+        "loss": info["loss"],
+        "metrics": metrics,
+        "losses": losses,
+        "weights": "random_init",
+        "trained_on": "selected_patch_only",
+    }
+    save_run(
+        out_dir,
+        patch_input_hu=patch_hu,
+        patch_denoised_hu=denoised_hu,
+        losses=losses,
+        config=config,
+    )
+    make_result_figure(
+        slice_hu=slice_hu,
+        patch_input_hu=patch_hu,
+        patch_denoised_hu=denoised_hu,
+        sigmas=cropped_sigmas,
+        coords=coords,
+        metrics=metrics,
+        display_window=tuple(args.display_window),
+        save_path=out_dir / "result.png",
+    )
+    print(
+        f"trained slice {args.slice} patch {coords}  params={info['params']}  "
+        f"mean|dHU|={metrics['mean_abs_change_hu']:.2f}  -> {out_dir}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
