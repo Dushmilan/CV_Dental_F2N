@@ -57,3 +57,28 @@ def test_train_patch_is_deterministic_and_finite():
     assert len(first_losses) == 2
     assert np.array_equal(first, second)
     assert first_info["params"] == second_info["params"]
+
+
+import json
+
+
+def test_compute_metrics_on_a_noop():
+    patch = np.full((8, 8), 100.0, dtype=np.float32)
+    metrics = pick_patch.compute_metrics(patch, patch, (-1000, 2000))
+    assert metrics["mean_abs_change_hu"] == 0.0
+    assert metrics["max_abs_change_hu"] == 0.0
+    assert np.isinf(metrics["psnr_input"])
+
+
+def test_save_run_writes_arrays_config_and_curve(tmp_path):
+    patch = np.zeros((32, 32), dtype=np.float32)
+    out = pick_patch.save_run(
+        tmp_path / "run",
+        patch_input_hu=patch,
+        patch_denoised_hu=patch,
+        losses=[1.0, 0.5],
+        config={"slice": 106, "coords": [1, 2, 32, 32]},
+    )
+    for name in ("patch_input_hu.npy", "patch_denoised_hu.npy", "loss_curve.png", "run_config.json"):
+        assert (out / name).exists()
+    assert json.loads((out / "run_config.json").read_text())["slice"] == 106

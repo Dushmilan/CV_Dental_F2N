@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import math
 import random
 import time
+from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
 from filter2noise import DenoisingPipeline, LossFunction
 
@@ -152,3 +156,49 @@ def train_patch(
         "sigmas": sigma_arrays,
     }
     return output, losses, info
+
+
+def compute_metrics(
+    patch_hu: np.ndarray, denoised_hu: np.ndarray, window: tuple[float, float]
+) -> dict:
+    """Measure how far the denoised patch moved from the input patch."""
+    lo, hi = float(window[0]), float(window[1])
+    data_range = hi - lo
+    diff = np.abs(
+        denoised_hu.astype(np.float64) - patch_hu.astype(np.float64)
+    )
+    with np.errstate(divide="ignore"):
+        psnr = peak_signal_noise_ratio(patch_hu, denoised_hu, data_range=data_range)
+    ssim = structural_similarity(patch_hu, denoised_hu, data_range=data_range)
+    return {
+        "mean_abs_change_hu": float(diff.mean()),
+        "max_abs_change_hu": float(diff.max()),
+        "psnr_input": float(psnr),
+        "ssim_input": float(ssim),
+    }
+
+
+def save_run(
+    out_dir: Path,
+    *,
+    patch_input_hu: np.ndarray,
+    patch_denoised_hu: np.ndarray,
+    losses: list[float],
+    config: dict,
+) -> Path:
+    """Write the patch arrays, config, and loss curve to ``out_dir``."""
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    np.save(out / "patch_input_hu.npy", patch_input_hu)
+    np.save(out / "patch_denoised_hu.npy", patch_denoised_hu)
+    (out / "run_config.json").write_text(json.dumps(config, indent=2))
+
+    fig, ax = plt.subplots(figsize=(5, 3))
+    ax.plot(range(1, len(losses) + 1), losses)
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("loss")
+    ax.set_yscale("log")
+    fig.tight_layout()
+    fig.savefig(out / "loss_curve.png", dpi=150)
+    plt.close(fig)
+    return out
