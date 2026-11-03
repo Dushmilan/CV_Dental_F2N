@@ -384,7 +384,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--slice", type=int, default=106)
     parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--lambda-weight", type=float, default=210.0)
+    parser.add_argument("--lambda-weight", type=float, default=200.0)
     parser.add_argument("--num-stages", type=int, default=2)
     parser.add_argument("--patch-size", type=int, default=8)
     parser.add_argument("--window", type=float, nargs=2, default=(-1000.0, 2000.0))

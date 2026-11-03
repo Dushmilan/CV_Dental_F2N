@@ -133,7 +133,7 @@ def test_parse_args_accepts_a_patch_bypass():
     args = pick_patch.parse_args(["--slice", "106", "--patch", "120", "140", "64", "64"])
     assert args.slice == 106
     assert args.patch == [120, 140, 64, 64]
-    assert args.lambda_weight == 210.0
+    assert args.lambda_weight == 200.0
 
 
 def test_snap_patch_rejects_an_image_below_the_minimum_patch():
