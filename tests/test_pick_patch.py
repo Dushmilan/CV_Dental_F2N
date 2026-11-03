@@ -35,3 +35,25 @@ def test_hu_conversion_round_trips_inside_the_window():
     unit = pick_patch.hu_to_unit(hu, (-1000, 2000))
     back = pick_patch.unit_to_hu(unit, (-1000, 2000))
     assert np.allclose(back, np.clip(hu, -1000, 2000), atol=1e-4)
+
+
+import torch
+
+
+def test_pad_and_crop_round_trip():
+    arr = np.arange(70 * 70, dtype=np.float32).reshape(70, 70)
+    padded, (top, left) = pick_patch.pad_to_multiple(arr, 16)
+    assert padded.shape == (80, 80)
+    assert np.array_equal(padded[top:top + 70, left:left + 70], arr)
+
+
+def test_train_patch_is_deterministic_and_finite():
+    patch = np.random.default_rng(0).random((32, 32)).astype(np.float32)
+    kwargs = dict(device=torch.device("cpu"), epochs=2, lr=1e-3, lambda_weight=350, seed=77)
+    first, first_losses, first_info = pick_patch.train_patch(patch, **kwargs)
+    second, second_losses, second_info = pick_patch.train_patch(patch, **kwargs)
+    assert first.shape == (32, 32)
+    assert np.isfinite(first).all()
+    assert len(first_losses) == 2
+    assert np.array_equal(first, second)
+    assert first_info["params"] == second_info["params"]
