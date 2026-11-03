@@ -338,27 +338,34 @@ def make_result_figure(
     save_path: Path,
     show: bool = False,
 ) -> Path:
-    """Save a six-panel inspection figure for one patch run."""
+    """Save an eight-panel inspection figure for one patch run."""
     x, y, w, h = coords
     lo, hi = display_window
     diff = patch_denoised_hu.astype(np.float32) - patch_input_hu.astype(np.float32)
     diff_limit = max(1.0, float(np.abs(diff).max()) * 8.0)
+    sigma_x = sigmas[0][..., 0]
+    sigma_y = sigmas[0][..., 1]
     sigma_r = sigmas[0][..., 2]
-    sigma_xy = np.sqrt(sigmas[0][..., 0] ** 2 + sigmas[0][..., 1] ** 2)
+    sigma_xy = np.sqrt(sigma_x ** 2 + sigma_y ** 2)
 
-    fig, axes = plt.subplots(2, 3, figsize=(15, 9))
+    fig, axes = plt.subplots(2, 4, figsize=(20, 9))
     panels = [
         (axes[0, 0], slice_hu, "gray", lo, hi, f"Slice, patch x={x} y={y} w={w} h={h}"),
         (axes[0, 1], patch_input_hu, "gray", lo, hi, "Patch input"),
         (axes[0, 2], patch_denoised_hu, "gray", lo, hi, "Patch denoised"),
-        (axes[1, 0], diff * 8.0, "seismic", -diff_limit, diff_limit, "Difference x8 (HU)"),
-        (axes[1, 1], sigma_r, "magma", None, None, "sigma_r (stage 1)"),
-        (axes[1, 2], sigma_xy, "viridis", 0.0, None, "sqrt(sigma_x^2 + sigma_y^2)"),
+        (axes[0, 3], diff * 8.0, "seismic", -diff_limit, diff_limit, "Difference x8 (HU)"),
+        (axes[1, 0], sigma_x, "viridis", 0.0, None, "sigma_x (stage 1, px)"),
+        (axes[1, 1], sigma_y, "viridis", 0.0, None, "sigma_y (stage 1, px)"),
+        (axes[1, 2], sigma_r, "magma", 0.0, None, "sigma_r (stage 1, unit)"),
+        (axes[1, 3], sigma_xy, "viridis", 0.0, None, "sqrt(sigma_x^2 + sigma_y^2)"),
     ]
+    images = []
     for ax, image, cmap, vmin, vmax, title in panels:
-        ax.imshow(image, cmap=cmap, vmin=vmin, vmax=vmax)
+        images.append(ax.imshow(image, cmap=cmap, vmin=vmin, vmax=vmax))
         ax.set_title(title)
         ax.axis("off")
+    for ax, image in zip(axes[1], images[4:]):
+        fig.colorbar(image, ax=ax, fraction=0.046, pad=0.02)
 
     axes[0, 0].add_patch(Rectangle((x, y), w, h, fill=False, edgecolor="red", lw=1.5))
     fig.suptitle(

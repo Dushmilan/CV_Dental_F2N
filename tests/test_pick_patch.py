@@ -216,6 +216,39 @@ def test_make_result_figure_shows_only_when_requested(tmp_path, monkeypatch):
     assert shown == [True]
 
 
+def test_make_result_figure_has_separate_spatial_sigma_panels(tmp_path, monkeypatch):
+    captured = {}
+    original_subplots = pick_patch.plt.subplots
+
+    def capture_subplots(*args, **kwargs):
+        fig, axes = original_subplots(*args, **kwargs)
+        captured["fig"] = fig
+        return fig, axes
+
+    monkeypatch.setattr(pick_patch.plt, "subplots", capture_subplots)
+    patch = np.zeros((32, 32), dtype=np.float32)
+    pick_patch.make_result_figure(
+        slice_hu=np.zeros((40, 40), dtype=np.float32),
+        patch_input_hu=patch,
+        patch_denoised_hu=patch,
+        sigmas=[np.ones((32, 32, 3), dtype=np.float32)],
+        coords=(0, 0, 32, 32),
+        metrics={
+            "mean_abs_change_hu": 0.0,
+            "max_abs_change_hu": 0.0,
+            "psnr_input": 50.0,
+            "ssim_input": 1.0,
+        },
+        display_window=(-200.0, 400.0),
+        save_path=tmp_path / "sigmas.png",
+    )
+    titles = [ax.get_title() for ax in captured["fig"].axes]
+    assert any(title.startswith("sigma_x") for title in titles)
+    assert any(title.startswith("sigma_y") for title in titles)
+    # Eight panels plus one colorbar axis for each of the four sigma panels.
+    assert len(captured["fig"].axes) == 12
+
+
 def test_main_shows_result_only_after_gui_selection(tmp_path, monkeypatch):
     np.save(tmp_path / "volume.npy", np.zeros((2, 40, 40), dtype=np.float32))
     monkeypatch.setattr(pick_patch, "train_patch", _fake_train)
